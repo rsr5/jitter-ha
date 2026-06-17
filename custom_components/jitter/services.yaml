@@ -1,0 +1,119 @@
+log_observation:
+  name: Log observation
+  description: >-
+    Send a free-form observation to jitter (the workhorse).  Tags the
+    observation source=sensor + recorded_via=ha so it's distinguished from
+    iOS HealthKit and MCP / agent paths in jitter's stats tools.
+  fields:
+    type:
+      name: Type
+      description: Classification, e.g. `bodyweight`, `walk`, `workout:cycling`.
+      required: true
+      example: bodyweight
+      selector:
+        text:
+    payload:
+      name: Payload
+      description: >-
+        Free-form metrics blob.  Any keys you like — the server stores it
+        as JSON.
+      required: true
+      example: '{"weight_kg": 87.4}'
+      selector:
+        object:
+    related_habit_slug:
+      name: Related habit slug
+      description: Optional — associate this observation with a habit.
+      required: false
+      example: walk
+      selector:
+        text:
+    recorded_at:
+      name: Recorded at
+      description: When the event actually happened.  Defaults to now.
+      required: false
+      selector:
+        datetime:
+    external_id:
+      name: External ID
+      description: >-
+        Dedup key.  Pass a stable id (e.g. `scale-{{ trigger.to_state.last_changed }}`)
+        so retriggers / HA restarts don't create duplicates.
+      required: false
+      example: 'scale-{{ trigger.to_state.last_changed }}'
+      selector:
+        text:
+    window_start:
+      name: Window start
+      description: Optional start of the time range this observation covers.
+      required: false
+      selector:
+        datetime:
+    window_end:
+      name: Window end
+      description: Optional end of the time range this observation covers.
+      required: false
+      selector:
+        datetime:
+
+complete_habit:
+  name: Complete habit
+  description: Mark a jitter habit done.
+  fields:
+    slug:
+      name: Habit slug
+      description: e.g. `brush-teeth`, `walk`, `plank`.
+      required: true
+      example: brush-teeth
+      selector:
+        text:
+    responded_at:
+      name: Responded at
+      description: >-
+        Backfill — within the last 14 days, not in the future.  Defaults to now.
+      required: false
+      selector:
+        datetime:
+    observation:
+      name: Observation
+      description: >-
+        Optional observation to attach to the completion in the same call.
+        Same shape as `log_observation` (type + payload + …).
+      required: false
+      selector:
+        object:
+
+skip_habit:
+  name: Skip habit
+  description: Mark a habit skipped for today (no completion, no snooze).
+  fields:
+    slug:
+      name: Habit slug
+      required: true
+      example: walk
+      selector:
+        text:
+
+snooze_habit:
+  name: Snooze habit
+  description: Push the next nudge for a habit out by N minutes.
+  fields:
+    slug:
+      name: Habit slug
+      required: true
+      example: walk
+      selector:
+        text:
+    minutes:
+      name: Snooze minutes
+      description: 5 to 1440 (24 hours).
+      required: true
+      default: 30
+      example: 30
+      selector:
+        number:
+          min: 5
+          max: 1440
+          step: 5
+          unit_of_measurement: min
+          mode: box
