@@ -1,110 +1,95 @@
-"""Config flow for the Jitter integration.
+"""OAuth Authorization Code config flow for the Jitter integration.
 
-Collects (base_url, api_token) and validates with a cheap GET /v1/today
-before persisting.  Single config entry — one jitter instance per HA.
+Inherits HA's `AbstractOAuth2FlowHandler` — that drives the full
+PKCE Authorization Code dance against Authentik using credentials the
+user previously entered into HA's Application Credentials.
+
+After Authentik redirects back with a `code`, HA exchanges it for an
+access_token + refresh_token, hands us the resulting OAuth2Session,
+and `async_oauth_create_entry` runs.  We persist the user-supplied
+`base_url` alongside the token; the OAuth2Session takes care of
+refresh from then on.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import aiohttp_client
+from homeassistant.helpers import config_entry_oauth2_flow
 
-from .api import JitterClient
-from .const import CONF_API_TOKEN, CONF_BASE_URL, DOMAIN
+from .const import CONF_BASE_URL, DOMAIN, OAUTH_SCOPES
 
-
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_BASE_URL, default="https://jitter.ridlers.org"): str,
-        vol.Required(CONF_API_TOKEN): str,
-    }
-)
+_LOGGER = logging.getLogger(__name__)
 
 
-class JitterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Initial user-driven setup."""
+class JitterOAuth2FlowHandler(
+    config_entry_oauth2_flow.AbstractOAuth2FlowHandler,
+    domain=DOMAIN,
+):
+    """OAuth flow handler — gates the integration on Authentik SSO."""
 
+    DOMAIN = DOMAIN
     VERSION = 1
+    CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
+
+    # The wizard order: the user first picks (or enters) the base URL +
+    # OAuth implementation, then HA hands them off to Authentik.
+    _base_url: str | None = None
+
+    @property
+    def logger(self) -> logging.Logger:
+        return _LOGGER
+
+    @property
+    def extra_authorize_data(self) -> dict[str, Any]:
+        """Extra params on the Authentik /authorize redirect.
+
+        Authentik expects scopes space-separated on the `scope` query
+        parameter — HA assembles this from the dict we return.
+        """
+        return {"scope": " ".join(OAUTH_SCOPES)}
+
+    # ── Steps ──────────────────────────────────────────────────────
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        # Single-instance — abort if already configured.
+        """Collect the base URL first, then delegate to OAuth pick-impl."""
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
 
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            session = aiohttp_client.async_get_clientsession(self.hass)
-            client = JitterClient(
-                session,
-                base_url=user_input[CONF_BASE_URL],
-                api_token=user_input[CONF_API_TOKEN],
+        if user_input is None:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(
+                            CONF_BASE_URL,
+                            default="https://jitter.ridlers.org",
+                        ): str,
+                    }
+                ),
             )
-            try:
-                await client.check_connection()
-            except HomeAssistantError as err:
-                msg = str(err).lower()
-                if "401" in msg or "invalid bearer" in msg:
-                    errors["base"] = "invalid_auth"
-                else:
-                    errors["base"] = "cannot_connect"
 
-            if not errors:
-                return self.async_create_entry(
-                    title="Jitter",
-                    data=user_input,
-                )
+        # Stash for `async_oauth_create_entry` to read after the OAuth
+        # round-trip finishes.
+        self._base_url = user_input[CONF_BASE_URL].rstrip("/")
+        return await self.async_step_pick_implementation()
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
-            errors=errors,
-        )
-
-    async def async_step_reconfigure(
-        self, user_input: dict[str, Any] | None = None
+    async def async_oauth_create_entry(
+        self, data: dict[str, Any]
     ) -> config_entries.ConfigFlowResult:
-        """Re-prompt for credentials so the bearer token can be rotated
-        without removing + re-adding the integration."""
-        entry = self._get_reconfigure_entry()
-        errors: dict[str, str] = {}
+        """Persist the base URL + OAuth tokens into a new config entry.
 
-        if user_input is not None:
-            session = aiohttp_client.async_get_clientsession(self.hass)
-            client = JitterClient(
-                session,
-                base_url=user_input[CONF_BASE_URL],
-                api_token=user_input[CONF_API_TOKEN],
-            )
-            try:
-                await client.check_connection()
-            except HomeAssistantError as err:
-                msg = str(err).lower()
-                errors["base"] = (
-                    "invalid_auth"
-                    if "401" in msg or "invalid bearer" in msg
-                    else "cannot_connect"
-                )
-            if not errors:
-                return self.async_update_reload_and_abort(
-                    entry, data=user_input
-                )
-
-        return self.async_show_form(
-            step_id="reconfigure",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_BASE_URL,
-                        default=entry.data.get(CONF_BASE_URL, ""),
-                    ): str,
-                    vol.Required(CONF_API_TOKEN): str,
-                }
-            ),
-            errors=errors,
+        HA stuffs the token dict under data["token"] for us; we just
+        add the base_url alongside.
+        """
+        return self.async_create_entry(
+            title="Jitter",
+            data={
+                **data,
+                CONF_BASE_URL: self._base_url,
+            },
         )

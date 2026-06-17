@@ -1,9 +1,9 @@
 # jitter-ha — Home Assistant custom integration
 
 Exposes jitter as four HA services so automations, scripts, and
-devices can write into jitter natively — without speaking JSON-RPC at
-the MCP endpoint and without baking bearer tokens into automation
-YAML.
+devices can write into jitter natively.  Authenticated via the same
+Authentik SSO that gates the MCP endpoint for claude.ai — no
+per-integration bearer to manage.
 
 | Service | What |
 |---|---|
@@ -61,21 +61,20 @@ restart HA**.
 
 ## Setup
 
-After install + restart, add via **Settings → Devices & Services →
-Add Integration → Jitter**.  Fields:
+Three one-off steps, then standard HA OAuth.  Full walkthrough in
+[`INSTALL.md`](./INSTALL.md); summary:
 
-| Field | Example |
-|---|---|
-| Base URL | `https://jitter.ridlers.org` |
-| API bearer token | An opaque string in jitter's `JITTER_BEARER_TOKENS` env |
+1. **Authentik** — create a new OAuth2 provider + application for
+   "jitter-ha", get a `client_id` + `client_secret`.  Redirect URI
+   must exactly match `https://<your-ha-external-url>/auth/external/callback`.
+2. **Jitter** — extend `JITTER_OIDC_AUDIENCE` to a comma-separated
+   list including HA's client_id, then rebuild the jitter Pi.
+3. **HA Application Credentials** — paste the Authentik client_id +
+   secret in **Settings → Devices & Services → Application
+   Credentials → Add**, integration "Jitter".
 
-Generate a dedicated HA bearer (don't reuse the iOS app's) so you can
-rotate it independently.  Add it to the `JITTER_BEARER_TOKENS`
-allow-list in `jitter-host/modules/secrets.nix` + nixos-rebuild the
-jitter Pi.
-
-The setup validates with a `GET /v1/today` round-trip — clear errors
-on auth (401) vs connection failure.
+Then **Add Integration → Jitter** triggers the Authorization Code
+flow.  HA redirects to Authentik, you approve, redirects back, done.
 
 ## First automation — the scale → jitter pipe
 
@@ -120,9 +119,11 @@ Two things worth noting:
   failure, everything else carries on.
 - **Short timeout.**  10 s per request.  Automations shouldn't stall
   waiting on jitter; the next trigger will get its own attempt.
-- **Token storage.**  Bearer lives in the config entry's `data`
-  dict.  HA encrypts at rest only with proper `secrets.yaml` setup;
-  rotate the token via the **Reconfigure** flow if it ever leaks.
+- **Token management.**  OAuth access tokens + refresh tokens live
+  in the config entry, managed by HA's `OAuth2Session`.  Refresh is
+  automatic on expiry.  Revoke access by deleting the Application
+  Credentials entry in HA, or by disabling the application in
+  Authentik admin.
 - **Idempotency is the caller's job.**  Pass a stable `external_id`
   on observations that may re-fire.  Without one, every retrigger
   creates a fresh row — fine for one-off events, bad for state-

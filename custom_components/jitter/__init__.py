@@ -1,9 +1,10 @@
-"""Jitter custom component — exposes jitter as HA services.
+"""Jitter custom component — OAuth-authenticated MCP client + HA services.
 
-The integration's whole product is the four `jitter.*` services
-registered here.  No entities (yet — see Phase 2 in the README), no
-discovery, no polling.  The config entry holds the bearer token +
-base URL; service handlers thunk into the api client.
+The four registered services (`jitter.log_observation` /
+`complete_habit` / `skip_habit` / `snooze_habit`) translate one-shot
+HA service calls into jitter MCP `tools/call` invocations.  Auth is
+OAuth via Authentik — the same SSO claude.ai uses, so revoking HA's
+access is one click in the Authentik admin UI.
 """
 from __future__ import annotations
 
@@ -15,12 +16,11 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import aiohttp_client
+from homeassistant.helpers import aiohttp_client, config_entry_oauth2_flow
 import homeassistant.helpers.config_validation as cv
 
 from .api import JitterClient
 from .const import (
-    CONF_API_TOKEN,
     CONF_BASE_URL,
     DOMAIN,
     SERVICE_COMPLETE_HABIT,
@@ -34,9 +34,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # ── Service schemas ─────────────────────────────────────────────────
 
-# datetime → ISO-8601 with Z suffix.  Jitter accepts RFC 3339; HA's
-# datetime helper produces tz-aware datetimes with offsets, which
-# parse fine on the server.
 def _iso(value: Any) -> str | None:
     if value is None:
         return None
@@ -70,8 +67,6 @@ SKIP_HABIT_SCHEMA = vol.Schema({vol.Required("slug"): cv.string})
 SNOOZE_HABIT_SCHEMA = vol.Schema(
     {
         vol.Required("slug"): cv.string,
-        # Tight range — 5 min minimum to avoid accidental noise, 24 h max
-        # because past that the planner should make the call, not the user.
         vol.Required("minutes"): vol.All(int, vol.Range(min=5, max=1440)),
     }
 )
@@ -80,15 +75,20 @@ SNOOZE_HABIT_SCHEMA = vol.Schema(
 # ── Entry lifecycle ─────────────────────────────────────────────────
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Wire up the api client + register services for one config entry."""
-    session = aiohttp_client.async_get_clientsession(hass)
-    client = JitterClient(
-        session,
-        base_url=entry.data[CONF_BASE_URL],
-        api_token=entry.data[CONF_API_TOKEN],
+    """Wire up the OAuth2-backed MCP client + register services."""
+    # Resolve the OAuth implementation HA stored when the user added
+    # the integration — that's how `OAuth2Session` knows which
+    # client_id / secret / endpoints to use on refresh.
+    implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
+        hass, entry
+    )
+    oauth_session = config_entry_oauth2_flow.OAuth2Session(
+        hass, entry, implementation
     )
 
-    # Stash the client so reload / unload + services can find it.
+    http = aiohttp_client.async_get_clientsession(hass)
+    client = JitterClient(http, oauth_session, base_url=entry.data[CONF_BASE_URL])
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = client
 
     # ── log_observation ────────────────────────────────────────────
@@ -106,8 +106,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except HomeAssistantError:
             raise
         except Exception as err:
-            # Defensive — should never happen given api.py's discipline,
-            # but never let an unexpected exception take down HA.
             _LOGGER.exception("log_observation failed unexpectedly")
             raise HomeAssistantError(f"log_observation failed: {err}") from err
 
@@ -173,7 +171,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Tear down services + drop the client when the entry's removed."""
     for svc in (
         SERVICE_LOG_OBSERVATION,
         SERVICE_COMPLETE_HABIT,
@@ -188,7 +185,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload — wired up so reconfigure (token rotation) takes effect
-    without an HA restart."""
     await async_unload_entry(hass, entry)
     await async_setup_entry(hass, entry)

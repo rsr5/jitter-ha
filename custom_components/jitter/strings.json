@@ -3,27 +3,29 @@
     "step": {
       "user": {
         "title": "Connect to Jitter",
-        "description": "Enter the base URL of your Jitter server and a bearer token allowed by `JITTER_BEARER_TOKENS`.",
+        "description": "Enter the base URL of your Jitter server. The next step authenticates via your Authentik SSO.",
         "data": {
-          "base_url": "Base URL",
-          "api_token": "API bearer token"
+          "base_url": "Base URL"
         }
       },
-      "reconfigure": {
-        "title": "Reconfigure Jitter",
-        "description": "Rotate your bearer token or point at a different Jitter instance.",
-        "data": {
-          "base_url": "Base URL",
-          "api_token": "API bearer token"
-        }
+      "pick_implementation": {
+        "title": "Authenticate with Authentik"
       }
     },
-    "error": {
-      "cannot_connect": "Could not reach Jitter at that URL.",
-      "invalid_auth": "Jitter rejected the bearer token (HTTP 401)."
-    },
     "abort": {
-      "single_instance_allowed": "Jitter is already configured."
+      "single_instance_allowed": "Jitter is already configured.",
+      "missing_configuration": "The integration needs Application Credentials set up first — see the documentation.",
+      "authorize_url_timeout": "Timeout generating the Authentik authorize URL.",
+      "no_url_available": "Could not determine HA's external URL for the OAuth redirect.",
+      "user_rejected_authorize": "You denied the authorization request in Authentik.",
+      "oauth_error": "Authentik returned an OAuth error.",
+      "oauth_failed": "OAuth flow failed.",
+      "oauth_timeout": "OAuth flow timed out.",
+      "oauth_unauthorized": "OAuth authorization was unauthorized.",
+      "reauth_successful": "Authentication renewed."
+    },
+    "create_entry": {
+      "default": "Jitter is connected."
     }
   }
 }
