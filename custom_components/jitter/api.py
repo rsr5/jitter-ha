@@ -27,9 +27,14 @@ from .const import (
     DEFAULT_SOURCE,
     MCP_PATH,
     MCP_TOOL_COMPLETE_HABIT,
+    MCP_TOOL_GET_GOAL,
+    MCP_TOOL_LIST_GOALS,
+    MCP_TOOL_LIST_HABITS,
+    MCP_TOOL_LOG_JOURNAL,
     MCP_TOOL_RECORD_OBSERVATION,
     MCP_TOOL_SKIP_HABIT,
     MCP_TOOL_SNOOZE_HABIT,
+    MCP_TOOL_TODAY,
     REQUEST_TIMEOUT_S,
 )
 
@@ -97,6 +102,30 @@ class JitterClient:
             args["window_end"] = window_end
         return await self._call_tool(MCP_TOOL_RECORD_OBSERVATION, args)
 
+    async def log_journal(
+        self,
+        *,
+        text: str,
+        actor: str,
+        title: str | None = None,
+        external_id: str | None = None,
+        recorded_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Call MCP tool `log_journal`.
+
+        Convenience wrapper around `record_observation` with
+        `type: "journal"` pre-set and `actor` surfaced as a first-class
+        field.  See `docs/observation-types.md` for the actor registry.
+        """
+        args: dict[str, Any] = {"text": text, "actor": actor}
+        if title is not None:
+            args["title"] = title
+        if external_id is not None:
+            args["external_id"] = external_id
+        if recorded_at is not None:
+            args["recorded_at"] = recorded_at
+        return await self._call_tool(MCP_TOOL_LOG_JOURNAL, args)
+
     async def complete_habit(
         self,
         *,
@@ -121,6 +150,33 @@ class JitterClient:
         return await self._call_tool(
             MCP_TOOL_SNOOZE_HABIT, {"slug": slug, "minutes": minutes}
         )
+
+    # ── Read-side methods (S38 sensor platform) ────────────────────
+
+    async def fetch_today(self) -> dict[str, Any]:
+        """Return today's planned items (habits + meetings) with their
+        outcomes.  Matches the MCP `today` tool's response shape."""
+        return await self._call_tool(MCP_TOOL_TODAY, {})
+
+    async def fetch_habits(self) -> list[dict[str, Any]]:
+        """All habits (enabled + disabled).  Returned list mirrors the
+        MCP `list_habits` tool's `habits` envelope."""
+        result = await self._call_tool(MCP_TOOL_LIST_HABITS, {})
+        return result.get("habits", []) if isinstance(result, dict) else []
+
+    async def fetch_goals(self, status: str | None = None) -> list[dict[str, Any]]:
+        """All goals matching the optional status filter."""
+        args: dict[str, Any] = {}
+        if status:
+            args["status"] = status
+        result = await self._call_tool(MCP_TOOL_LIST_GOALS, args)
+        return result.get("goals", []) if isinstance(result, dict) else []
+
+    async def fetch_goal_with_progress(self, slug: str) -> dict[str, Any]:
+        """Goal + computed progress + chart-ready series.  This is the
+        per-goal read the sensor platform exposes as the goal sensor's
+        attributes."""
+        return await self._call_tool(MCP_TOOL_GET_GOAL, {"slug": slug})
 
     # ── Internals ─────────────────────────────────────────────────
 

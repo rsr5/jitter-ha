@@ -8,9 +8,31 @@ per-integration bearer to manage.
 | Service | What |
 |---|---|
 | `jitter.log_observation` | Free-form observation (the workhorse — feed scale weights, walks, sleep snippets, anything) |
+| `jitter.log_journal` | Free-text journal entry with a named actor (defaults to `user`).  See [observation-types.md](https://github.com/rsr5/nas-buildout/blob/main/jitter/docs/observation-types.md) for the actor registry. |
 | `jitter.complete_habit` | Mark a habit done; optionally attach an observation in the same call |
 | `jitter.skip_habit` | Skip today's instance of a habit |
 | `jitter.snooze_habit` | Push the next nudge out 5–1440 min |
+
+## Sensors (S38)
+
+The integration also exposes jitter state as HA entities so dashboards
+and automations can read habit + goal progress without going through
+Claude.  Polled every 5 minutes (configurable via
+`COORDINATOR_INTERVAL_SECONDS`).  All entities grouped under a single
+"Jitter" device in HA's registry.
+
+| Entity | State | Notes |
+|---|---|---|
+| `sensor.jitter_habits_done_today` | count | Attrs: list of done items |
+| `sensor.jitter_habits_remaining_today` | count | Attrs: list with `start` + `status` |
+| `sensor.jitter_next_habit_due` | habit name | Attrs: slug, start, status |
+| `sensor.jitter_active_streaks` | count | (v1 = done-today count; real streak data when habit_history is in the coordinator) |
+| `binary_sensor.jitter_today_complete` | on/off | On when every due habit reached a terminal status |
+| `sensor.jitter_habit_<slug>` *(per habit)* | due / done / skipped / snoozed / … | Attrs: name, category, duration, due_at, title, subtitle |
+| `sensor.jitter_goal_<slug>` *(per goal)* | on_track / ahead / behind / achieved / missed / unknown | Attrs: current, target, gap, days_remaining, projection, catch_up_rate, … |
+
+Dynamic discovery: every habit and goal returned by jitter gets an
+entity automatically.  New ones surface on the next coordinator tick.
 
 ## Architecture
 

@@ -56,6 +56,54 @@ log_observation:
       selector:
         datetime:
 
+log_journal:
+  name: Log journal entry
+  description: >-
+    Capture a free-text journal entry — the shared notebook between
+    the user and any AI agents.  Defaults `actor` to "user" since
+    most HA automations represent user intent (you wrote them).
+  fields:
+    text:
+      name: Text
+      description: The journal entry body.
+      required: true
+      example: 'Roof is leaking again — call roofer in the morning.'
+      selector:
+        text:
+          multiline: true
+    actor:
+      name: Actor
+      description: >-
+        Who is speaking.  Defaults to `user`.  Use a stable
+        kebab-case slug for any AI agent (`claude-web`, `claude-code`,
+        `jitter-agent`).  See jitter's `docs/observation-types.md`
+        for the registry.
+      required: false
+      default: user
+      example: user
+      selector:
+        text:
+    title:
+      name: Title
+      description: Optional one-line summary preserved alongside the body.
+      required: false
+      selector:
+        text:
+    external_id:
+      name: External ID
+      description: >-
+        Dedup key.  Pass a stable id (e.g. `journal-{{ trigger.id }}`)
+        if the same automation may fire twice for the same event.
+      required: false
+      selector:
+        text:
+    recorded_at:
+      name: Recorded at
+      description: When the thought happened.  Defaults to now.
+      required: false
+      selector:
+        datetime:
+
 complete_habit:
   name: Complete habit
   description: Mark a jitter habit done.

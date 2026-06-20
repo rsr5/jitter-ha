@@ -1,10 +1,10 @@
 """Jitter custom component — OAuth-authenticated MCP client + HA services.
 
-The four registered services (`jitter.log_observation` /
-`complete_habit` / `skip_habit` / `snooze_habit`) translate one-shot
-HA service calls into jitter MCP `tools/call` invocations.  Auth is
-OAuth via Authentik — the same SSO claude.ai uses, so revoking HA's
-access is one click in the Authentik admin UI.
+The five registered services (`jitter.log_observation` /
+`log_journal` / `complete_habit` / `skip_habit` / `snooze_habit`)
+translate one-shot HA service calls into jitter MCP `tools/call`
+invocations.  Auth is OAuth via Authentik — the same SSO claude.ai
+uses, so revoking HA's access is one click in the Authentik admin UI.
 """
 from __future__ import annotations
 
@@ -19,15 +19,25 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import aiohttp_client, config_entry_oauth2_flow
 import homeassistant.helpers.config_validation as cv
 
+from homeassistant.const import Platform
+
 from .api import JitterClient
 from .const import (
     CONF_BASE_URL,
+    DEFAULT_JOURNAL_ACTOR,
     DOMAIN,
     SERVICE_COMPLETE_HABIT,
+    SERVICE_LOG_JOURNAL,
     SERVICE_LOG_OBSERVATION,
     SERVICE_SKIP_HABIT,
     SERVICE_SNOOZE_HABIT,
 )
+from .coordinator import JitterCoordinator
+
+# S38 — read-side platforms.  Each owns its entity classes; the
+# coordinator is shared.  Platform forwarding happens at end of
+# async_setup_entry.
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +61,20 @@ LOG_OBSERVATION_SCHEMA = vol.Schema(
         vol.Optional("external_id"): cv.string,
         vol.Optional("window_start"): cv.datetime,
         vol.Optional("window_end"): cv.datetime,
+    }
+)
+
+LOG_JOURNAL_SCHEMA = vol.Schema(
+    {
+        vol.Required("text"): cv.string,
+        # Default to "user" — most HA automations represent user
+        # intent (the user wrote them).  Advanced automations can
+        # override with their own kebab-case slug; see the actor
+        # registry in jitter's docs/observation-types.md.
+        vol.Optional("actor", default=DEFAULT_JOURNAL_ACTOR): cv.string,
+        vol.Optional("title"): cv.string,
+        vol.Optional("external_id"): cv.string,
+        vol.Optional("recorded_at"): cv.datetime,
     }
 )
 
@@ -89,7 +113,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     http = aiohttp_client.async_get_clientsession(hass)
     client = JitterClient(http, oauth_session, base_url=entry.data[CONF_BASE_URL])
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = client
+    # S38 — read-side coordinator + entity platforms.  The coordinator
+    # polls jitter's MCP at COORDINATOR_INTERVAL and feeds the sensor
+    # + binary_sensor platforms.  First refresh blocks setup so the
+    # platforms have data when they're forwarded — otherwise dynamic
+    # discovery (one entity per habit/goal) sees an empty list and
+    # nothing surfaces until the next tick.
+    coordinator = JitterCoordinator(hass, client)
+    await coordinator.async_config_entry_first_refresh()
+
+    # `hass.data` bucket grew a layer: keep the existing `client`
+    # at the entry_id (for the four service handlers below) but
+    # park the coordinator alongside under a dict so the platform
+    # files can find it.
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+        "client": client,
+        "coordinator": coordinator,
+    }
 
     # ── log_observation ────────────────────────────────────────────
     async def handle_log_observation(call: ServiceCall) -> None:
@@ -108,6 +148,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as err:
             _LOGGER.exception("log_observation failed unexpectedly")
             raise HomeAssistantError(f"log_observation failed: {err}") from err
+
+    # ── log_journal ────────────────────────────────────────────────
+    async def handle_log_journal(call: ServiceCall) -> None:
+        try:
+            await client.log_journal(
+                text=call.data["text"],
+                actor=call.data["actor"],
+                title=call.data.get("title"),
+                external_id=call.data.get("external_id"),
+                recorded_at=_iso(call.data.get("recorded_at")),
+            )
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            _LOGGER.exception("log_journal failed unexpectedly")
+            raise HomeAssistantError(f"log_journal failed: {err}") from err
 
     # ── complete_habit ─────────────────────────────────────────────
     async def handle_complete_habit(call: ServiceCall) -> None:
@@ -151,6 +207,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         schema=LOG_OBSERVATION_SCHEMA,
     )
     hass.services.async_register(
+        DOMAIN, SERVICE_LOG_JOURNAL, handle_log_journal,
+        schema=LOG_JOURNAL_SCHEMA,
+    )
+    hass.services.async_register(
         DOMAIN, SERVICE_COMPLETE_HABIT, handle_complete_habit,
         schema=COMPLETE_HABIT_SCHEMA,
     )
@@ -163,16 +223,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         schema=SNOOZE_HABIT_SCHEMA,
     )
 
+    # S38 — forward to sensor + binary_sensor platforms so HA
+    # constructs the read-side entities.  Must happen after the
+    # coordinator + hass.data bucket are in place (platforms read
+    # from it).
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     _LOGGER.info(
-        "Jitter integration set up — registered 4 services against %s",
+        "Jitter integration set up — 5 services + %d entity platforms against %s",
+        len(PLATFORMS),
         entry.data[CONF_BASE_URL],
     )
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # S38 — drop the read-side platforms first; they hold references
+    # to the coordinator that we're about to pop from hass.data.
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
     for svc in (
         SERVICE_LOG_OBSERVATION,
+        SERVICE_LOG_JOURNAL,
         SERVICE_COMPLETE_HABIT,
         SERVICE_SKIP_HABIT,
         SERVICE_SNOOZE_HABIT,
@@ -181,7 +253,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.services.async_remove(DOMAIN, svc)
 
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    return True
+    return unload_ok
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
