@@ -22,6 +22,19 @@ import aiohttp
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 
+
+class JitterTransientError(HomeAssistantError):
+    """Retryable failure — network blip, 5xx, or a timeout.  The
+    delivery queue (S50) catches these, backs off, and retries the
+    same call.  Also propagates as HomeAssistantError so any direct
+    synchronous caller (the read-side coordinator) still sees a
+    conventional HA error surface."""
+
+
+class JitterPermanentError(HomeAssistantError):
+    """Non-retryable failure — 4xx (bad slug, malformed payload,
+    revoked auth).  Retrying won't help; the queue logs and drops."""
+
 from .const import (
     DEFAULT_RECORDED_VIA,
     DEFAULT_SOURCE,
@@ -215,15 +228,33 @@ class JitterClient:
                     json=envelope,
                 )
         except (asyncio.TimeoutError, aiohttp.ClientError) as err:
-            raise HomeAssistantError(f"Cannot reach jitter MCP: {err}") from err
+            # Transport-level failure (timeout, connection refused,
+            # DNS blip) — the queue backs off and retries.
+            raise JitterTransientError(f"Cannot reach jitter MCP: {err}") from err
 
+        # 401 = token was rejected.  HA's OAuth session will refresh
+        # on the next call; that's usually a transient (mid-refresh)
+        # situation rather than a "you're locked out" one, so we retry.
+        # Genuine "revoked in Authentik" cases still cycle a few times
+        # before the user notices the queue metric climbing — an
+        # acceptable trade for keeping brief token races from dropping
+        # events.
         if resp.status == 401:
-            raise HomeAssistantError(
+            raise JitterTransientError(
                 "Jitter MCP rejected the OAuth token (HTTP 401)"
             )
+        # 5xx = server had a problem; retry.
+        if resp.status >= 500:
+            body = await resp.text()
+            raise JitterTransientError(
+                f"Jitter MCP HTTP {resp.status}: {body[:200]}"
+            )
+        # 4xx (other than 401) = the *request* is invalid — bad slug,
+        # malformed payload, unsupported tool.  No amount of retrying
+        # fixes that.
         if resp.status >= 400:
             body = await resp.text()
-            raise HomeAssistantError(
+            raise JitterPermanentError(
                 f"Jitter MCP HTTP {resp.status}: {body[:200]}"
             )
 
@@ -232,7 +263,11 @@ class JitterClient:
             err = body["error"]
             code = err.get("code")
             message = err.get("message", "unknown")
-            raise HomeAssistantError(
+            # JSON-RPC errors are application-level and typically
+            # non-retryable (unknown tool, invalid params).  If a
+            # future MCP flavour signals "temporary" via a specific
+            # code, split it here.
+            raise JitterPermanentError(
                 f"Jitter MCP error {code}: {message}"
             )
         return body.get("result")

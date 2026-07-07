@@ -33,6 +33,7 @@ from .const import (
     SERVICE_SNOOZE_HABIT,
 )
 from .coordinator import JitterCoordinator
+from .delivery import JitterDeliveryQueue
 
 # S38 — read-side platforms.  Each owns its entity classes; the
 # coordinator is shared.  Platform forwarding happens at end of
@@ -122,6 +123,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = JitterCoordinator(hass, client)
     await coordinator.async_config_entry_first_refresh()
 
+    # S50 — retry-until-delivered queue for the five write-side
+    # service handlers below.  Read-side (sensor coordinator) still
+    # calls the client directly since its natural retry is the next
+    # poll interval; only the fire-side needs the queue.
+    delivery = JitterDeliveryQueue(client)
+    delivery.start()
+
     # `hass.data` bucket grew a layer: keep the existing `client`
     # at the entry_id (for the four service handlers below) but
     # park the coordinator alongside under a dict so the platform
@@ -129,78 +137,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "client": client,
         "coordinator": coordinator,
+        "delivery": delivery,
     }
+
+    # S50 — each write handler enqueues to the delivery queue and
+    # returns immediately.  The queue worker retries transient
+    # failures until the call lands (or a permanent 4xx drops it).
+    # Automations calling these services always see success — they
+    # can't and shouldn't be blocked on jitter's availability.
 
     # ── log_observation ────────────────────────────────────────────
     async def handle_log_observation(call: ServiceCall) -> None:
-        try:
-            await client.log_observation(
-                kind=call.data["type"],
-                payload=call.data["payload"],
-                related_habit_slug=call.data.get("related_habit_slug"),
-                recorded_at=_iso(call.data.get("recorded_at")),
-                external_id=call.data.get("external_id"),
-                window_start=_iso(call.data.get("window_start")),
-                window_end=_iso(call.data.get("window_end")),
-            )
-        except HomeAssistantError:
-            raise
-        except Exception as err:
-            _LOGGER.exception("log_observation failed unexpectedly")
-            raise HomeAssistantError(f"log_observation failed: {err}") from err
+        delivery.enqueue(
+            "log_observation",
+            kind=call.data["type"],
+            payload=call.data["payload"],
+            related_habit_slug=call.data.get("related_habit_slug"),
+            recorded_at=_iso(call.data.get("recorded_at")),
+            external_id=call.data.get("external_id"),
+            window_start=_iso(call.data.get("window_start")),
+            window_end=_iso(call.data.get("window_end")),
+        )
 
     # ── log_journal ────────────────────────────────────────────────
     async def handle_log_journal(call: ServiceCall) -> None:
-        try:
-            await client.log_journal(
-                text=call.data["text"],
-                actor=call.data["actor"],
-                title=call.data.get("title"),
-                external_id=call.data.get("external_id"),
-                recorded_at=_iso(call.data.get("recorded_at")),
-            )
-        except HomeAssistantError:
-            raise
-        except Exception as err:
-            _LOGGER.exception("log_journal failed unexpectedly")
-            raise HomeAssistantError(f"log_journal failed: {err}") from err
+        delivery.enqueue(
+            "log_journal",
+            text=call.data["text"],
+            actor=call.data["actor"],
+            title=call.data.get("title"),
+            external_id=call.data.get("external_id"),
+            recorded_at=_iso(call.data.get("recorded_at")),
+        )
 
     # ── complete_habit ─────────────────────────────────────────────
     async def handle_complete_habit(call: ServiceCall) -> None:
-        try:
-            await client.complete_habit(
-                slug=call.data["slug"],
-                responded_at=_iso(call.data.get("responded_at")),
-                observation=call.data.get("observation"),
-            )
-        except HomeAssistantError:
-            raise
-        except Exception as err:
-            _LOGGER.exception("complete_habit failed unexpectedly")
-            raise HomeAssistantError(f"complete_habit failed: {err}") from err
+        delivery.enqueue(
+            "complete_habit",
+            slug=call.data["slug"],
+            responded_at=_iso(call.data.get("responded_at")),
+            observation=call.data.get("observation"),
+        )
 
     # ── skip_habit ─────────────────────────────────────────────────
     async def handle_skip_habit(call: ServiceCall) -> None:
-        try:
-            await client.skip_habit(slug=call.data["slug"])
-        except HomeAssistantError:
-            raise
-        except Exception as err:
-            _LOGGER.exception("skip_habit failed unexpectedly")
-            raise HomeAssistantError(f"skip_habit failed: {err}") from err
+        delivery.enqueue("skip_habit", slug=call.data["slug"])
 
     # ── snooze_habit ───────────────────────────────────────────────
     async def handle_snooze_habit(call: ServiceCall) -> None:
-        try:
-            await client.snooze_habit(
-                slug=call.data["slug"],
-                minutes=call.data["minutes"],
-            )
-        except HomeAssistantError:
-            raise
-        except Exception as err:
-            _LOGGER.exception("snooze_habit failed unexpectedly")
-            raise HomeAssistantError(f"snooze_habit failed: {err}") from err
+        delivery.enqueue(
+            "snooze_habit",
+            slug=call.data["slug"],
+            minutes=call.data["minutes"],
+        )
 
     hass.services.async_register(
         DOMAIN, SERVICE_LOG_OBSERVATION, handle_log_observation,
@@ -252,7 +241,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if hass.services.has_service(DOMAIN, svc):
             hass.services.async_remove(DOMAIN, svc)
 
-    hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    # S50 — stop the drain worker.  Pending events in the queue are
+    # dropped by design (blocking HA shutdown on jitter round-trips
+    # would stall the whole reload).
+    bucket = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    if bucket is not None:
+        delivery = bucket.get("delivery")
+        if delivery is not None:
+            await delivery.stop()
     return unload_ok
 
 
