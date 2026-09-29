@@ -16,11 +16,12 @@ A small `asyncio.Queue` fed by the service handlers and drained by a
 single background task.  The drain worker:
 
 - **Delivers on 2xx.**  Log INFO, move on.
-- **Drops on 4xx** (other than 401): the request is permanently
+- **Drops on 4xx** (other than 401 and 403): the request is permanently
   invalid, retrying won't help.  Log WARN with the payload preview
   so a bad automation is diagnosable.
 - **Retries transient failures forever** — network timeouts, 5xx,
-  and 401s (usually a mid-refresh OAuth race) — with capped
+  401s (usually a mid-refresh OAuth race) and 403s (the Cloudflare
+  Access edge gate refusing a missing or stale service token) — with capped
   exponential backoff (1s → 2s → ... → 300s cap).  The same call
   is popped, retried, and only removed from the queue on success or
   permanent failure.

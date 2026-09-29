@@ -5,6 +5,13 @@ DOMAIN = "jitter"
 # Config-entry keys
 CONF_BASE_URL = "base_url"
 
+# Options-flow keys (forge #608): the `jitter-ha` Cloudflare Access service
+# token.  Once jitter.ridlers.org has its `deny-all` Access application,
+# every /mcp call must carry this pair or Cloudflare answers 403 at the
+# edge before jitter sees the request.  Empty = no headers sent.
+CONF_CF_ACCESS_CLIENT_ID = "cf_access_client_id"
+CONF_CF_ACCESS_CLIENT_SECRET = "cf_access_client_secret"
+
 # Authentik (OAuth/OIDC issuer) — same provider as claude.ai uses for
 # the MCP endpoint.  Hard-coded since this integration only ever talks
 # to one Authentik tenant.  If you ever move OAuth providers, change

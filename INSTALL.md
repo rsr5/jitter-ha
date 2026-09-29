@@ -166,7 +166,7 @@ action:
       type: bodyweight
       payload:
         weight_kg: "{{ trigger.to_state.state | float }}"
-      external_id: "scale-{{ trigger.to_state.last_changed }}"
+      external_id: "scale-{{ trigger.to_state.last_updated }}"
 ```
 
 **Why `_real_time_weight` is wrong**: smart scales typically expose
@@ -175,10 +175,20 @@ two entities — `_weight` (final, settled, fires once per weigh-in) and
 shift weight).  Triggering off real-time would spray dozens of
 observations per weigh-in.
 
-**Why the `external_id` shape**: `last_changed` of the settled state
-is unique per weigh-in.  Same automation re-fires from HA restarts or
-recovery won't duplicate the observation — jitter's `(user_id, source,
-external_id)` unique key returns the existing row instead.
+**Why the `external_id` shape**: `last_updated` changes on every state
+write, so it is unique per weigh-in.  A re-fire from an HA restart or
+recovery replays the same value and won't duplicate the observation —
+jitter's `(user_id, source, external_id)` unique key returns the
+existing row instead.
+
+> **Use `last_updated`, not `last_changed`.**  `last_changed` only
+> advances when the state VALUE changes, so weighing in two days
+> running at the same rounded weight produces the SAME `external_id`
+> twice.  The server then treats the second reading as a duplicate of
+> the first and that day's weigh-in is lost.  This cost a real
+> weigh-in before it was found; the server now returns 409 on a reused
+> id with different content rather than silently dropping it, but the
+> template is the actual fix.
 
 ## Troubleshooting
 

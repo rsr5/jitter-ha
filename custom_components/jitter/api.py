@@ -32,8 +32,8 @@ class JitterTransientError(HomeAssistantError):
 
 
 class JitterPermanentError(HomeAssistantError):
-    """Non-retryable failure — 4xx (bad slug, malformed payload,
-    revoked auth).  Retrying won't help; the queue logs and drops."""
+    """Non-retryable failure — 4xx other than 401/403 (bad slug,
+    malformed payload).  Retrying won't help; the queue logs and drops."""
 
 from .const import (
     DEFAULT_RECORDED_VIA,
@@ -60,10 +60,22 @@ class JitterClient:
         session: aiohttp.ClientSession,
         oauth_session: OAuth2Session,
         base_url: str,
+        cf_access_client_id: str = "",
+        cf_access_client_secret: str = "",
     ) -> None:
         self._http = session
         self._oauth = oauth_session
         self._base = base_url.rstrip("/")
+        # Cloudflare Access service token (forge #608) — the edge gate in
+        # front of jitter.  Sent only when both halves are set.
+        self._cf_headers: dict[str, str] = (
+            {
+                "CF-Access-Client-Id": cf_access_client_id,
+                "CF-Access-Client-Secret": cf_access_client_secret,
+            }
+            if cf_access_client_id and cf_access_client_secret
+            else {}
+        )
 
     # ── Connection-test ────────────────────────────────────────────
 
@@ -224,6 +236,7 @@ class JitterClient:
                         "Authorization": f"Bearer {access_token}",
                         "Content-Type": "application/json",
                         "Accept": "application/json",
+                        **self._cf_headers,
                     },
                     json=envelope,
                 )
@@ -242,6 +255,17 @@ class JitterClient:
         if resp.status == 401:
             raise JitterTransientError(
                 "Jitter MCP rejected the OAuth token (HTTP 401)"
+            )
+        # 403 = almost always Cloudflare Access refusing the request at
+        # the edge: service token missing, wrong, revoked or expired
+        # (forge #608).  That is fixed by entering a good pair in the
+        # integration's options, not by changing the call — so keep the
+        # event queued and retry rather than dropping a ride or a habit
+        # completion on the floor.
+        if resp.status == 403:
+            raise JitterTransientError(
+                "Jitter refused at the edge (HTTP 403) — check the "
+                "Cloudflare Access service token in the integration options"
             )
         # 5xx = server had a problem; retry.
         if resp.status >= 500:

@@ -23,6 +23,8 @@ from homeassistant.const import Platform
 
 from .api import JitterClient
 from .const import (
+    CONF_CF_ACCESS_CLIENT_ID,
+    CONF_CF_ACCESS_CLIENT_SECRET,
     CONF_BASE_URL,
     DEFAULT_JOURNAL_ACTOR,
     DOMAIN,
@@ -112,7 +114,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     http = aiohttp_client.async_get_clientsession(hass)
-    client = JitterClient(http, oauth_session, base_url=entry.data[CONF_BASE_URL])
+    client = JitterClient(
+        http,
+        oauth_session,
+        base_url=entry.data[CONF_BASE_URL],
+        cf_access_client_id=entry.options.get(CONF_CF_ACCESS_CLIENT_ID, ""),
+        cf_access_client_secret=entry.options.get(CONF_CF_ACCESS_CLIENT_SECRET, ""),
+    )
+    # A new Cloudflare Access pair entered under Configure takes effect
+    # by reloading the entry (forge #608).
+    entry.async_on_unload(entry.add_update_listener(_async_reload_on_options))
 
     # S38 — read-side coordinator + entity platforms.  The coordinator
     # polls jitter's MCP at COORDINATOR_INTERVAL and feeds the sensor
@@ -224,6 +235,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_BASE_URL],
     )
     return True
+
+
+async def _async_reload_on_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

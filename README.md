@@ -116,7 +116,7 @@ automation:
           type: bodyweight
           payload:
             weight_kg: "{{ trigger.to_state.state | float }}"
-          external_id: "scale-{{ trigger.to_state.last_changed }}"
+          external_id: "scale-{{ trigger.to_state.last_updated }}"
 ```
 
 Two things worth noting:
@@ -124,8 +124,11 @@ Two things worth noting:
 1. **`external_id` is the dedup hook.**  Jitter has a unique key on
    `(user_id, source, external_id)` — re-firing the automation with
    the same `external_id` returns the existing observation rather
-   than inserting a duplicate.  Anchoring on
-   `trigger.to_state.last_changed` is a good cheap stable id.
+   than inserting a duplicate.  Anchor on
+   `trigger.to_state.last_updated`, which advances on every state
+   write.  Do **not** use `last_changed`: it only advances when the
+   VALUE changes, so two weigh-ins at the same rounded weight collide
+   on one id and the second reading is lost.
 2. **Trigger off the settled entity, not the real-time one.**
    Smart-scale integrations typically expose a `_real_time_weight`
    entity that updates while you're still standing on the scale —

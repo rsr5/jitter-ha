@@ -27,5 +27,17 @@
     "create_entry": {
       "default": "Jitter is connected."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Cloudflare Access",
+        "description": "The `jitter-ha` Cloudflare Access service token. Every call to jitter carries it so Cloudflare lets the request through to the server. Leave both empty only while the host has no Access gate.",
+        "data": {
+          "cf_access_client_id": "Client ID (CF-Access-Client-Id)",
+          "cf_access_client_secret": "Client secret (CF-Access-Client-Secret)"
+        }
+      }
+    }
   }
 }
