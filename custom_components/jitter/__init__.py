@@ -114,16 +114,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     http = aiohttp_client.async_get_clientsession(hass)
+    cf_pair = _cf_pair(entry)
     client = JitterClient(
         http,
         oauth_session,
         base_url=entry.data[CONF_BASE_URL],
-        cf_access_client_id=entry.options.get(CONF_CF_ACCESS_CLIENT_ID, ""),
-        cf_access_client_secret=entry.options.get(CONF_CF_ACCESS_CLIENT_SECRET, ""),
+        cf_access_client_id=cf_pair[0],
+        cf_access_client_secret=cf_pair[1],
     )
+
     # A new Cloudflare Access pair entered under Configure takes effect
-    # by reloading the entry (forge #608).
-    entry.async_on_unload(entry.add_update_listener(_async_reload_on_options))
+    # by reloading the entry (forge #608).  Only when the pair actually
+    # changed: HA calls update listeners on EVERY entry update, and
+    # OAuth2Session saves each refreshed token into entry.data.  jitter's
+    # tokens last 5 minutes, so reloading unconditionally restarted the
+    # integration every few minutes and the reload dropped whatever the
+    # delivery queue was sending (forge #612: a lost weigh-in).
+    async def _reload_if_cf_pair_changed(
+        hass: HomeAssistant, entry: ConfigEntry
+    ) -> None:
+        if _cf_pair(entry) != cf_pair:
+            await hass.config_entries.async_reload(entry.entry_id)
+
+    entry.async_on_unload(entry.add_update_listener(_reload_if_cf_pair_changed))
 
     # S38 — read-side coordinator + entity platforms.  The coordinator
     # polls jitter's MCP at COORDINATOR_INTERVAL and feeds the sensor
@@ -237,8 +250,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def _async_reload_on_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+def _cf_pair(entry: ConfigEntry) -> tuple[str, str]:
+    """The Cloudflare Access service token pair from the entry options."""
+    return (
+        entry.options.get(CONF_CF_ACCESS_CLIENT_ID, ""),
+        entry.options.get(CONF_CF_ACCESS_CLIENT_SECRET, ""),
+    )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
